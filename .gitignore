@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
+.env*
+*.sqlite*
+*.db*
+*.cookie*
+*password*
+*token*
+invite*.html
+source.json
+bridge.json
+.private-data/
+dist/
