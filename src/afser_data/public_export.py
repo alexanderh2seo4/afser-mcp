@@ -1,18 +1,21 @@
-"""Explicit anonymous static export; raw_records is never queried here."""
+"""Explicit public export with a narrow, pseudonymous returnee projection."""
 import json
 import hashlib
 import re
 import shutil
 import tempfile
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .config import load_json
 from .models import KINDS
 from .privacy import PUBLIC_STATUS, source_link
+from .returnee_export import project_returnees, write_returnees_xlsx
 
 FIELDS = frozenset({'id','kind','chapterId','status','urgent','deadline','country','sourceUrl','city','location','hasOpenRoles','pickedAt'})
+PUBLIC_KINDS = tuple('awayees' if kind == 'hopees' else kind for kind in sorted(KINDS))
 
 
 def validated_record(record):
@@ -47,22 +50,26 @@ def export_public(store, output: Path):
         if not (output / 'manifest.json').is_file() or json.loads((output / 'manifest.json').read_text()).get('privacy') != 'randomized-public-locality; 1km-circles; no-names-or-addresses':
             raise ValueError('unmanaged_export_target')
     output.parent.mkdir(parents=True, exist_ok=True)
-    grouped = defaultdict(lambda: {kind: [] for kind in sorted(KINDS)})
-    counts = {kind: 0 for kind in sorted(KINDS)}
+    grouped = defaultdict(lambda: {kind: [] for kind in PUBLIC_KINDS})
+    counts = {kind: 0 for kind in PUBLIC_KINDS}
     with store.connect(read_snapshot=True) as db:
         snapshot = store._active(db)
         if snapshot is None:
             raise ValueError('no_complete_snapshot')
+        returnees = project_returnees(db, snapshot, store.salt)
         chapters = [dict(row) for row in db.execute('SELECT id,name FROM chapters WHERE snapshot=? ORDER BY name', (snapshot,))]
         chapter_ids = {c['id'] for c in chapters}
         for row in db.execute('SELECT body FROM public_records WHERE snapshot=? AND active=1 ORDER BY urgent DESC,id', (snapshot,)):
             record = validated_record(json.loads(row[0]))
             if record['chapterId'] not in chapter_ids | {'unassigned'}:
                 raise ValueError('unknown_public_chapter')
-            grouped['all'][record['kind']].append(record)
+            public_record = dict(record)
+            if public_record['kind'] == 'hopees':
+                public_record['kind'] = 'awayees'
+            grouped['all'][public_record['kind']].append(public_record)
             if record['chapterId'] in chapter_ids:
-                grouped[record['chapterId']][record['kind']].append(record)
-            counts[record['kind']] += 1
+                grouped[record['chapterId']][public_record['kind']].append(public_record)
+            counts[public_record['kind']] += 1
         places = [[r['id'],r['city'],r['chapter'],round(r['latitude'],4),round(r['longitude'],4),r['postal_code']] for r in db.execute('SELECT * FROM places WHERE snapshot=? ORDER BY city,id', (snapshot,))]
         updated = db.execute('SELECT created_at FROM snapshots WHERE id=?', (snapshot,)).fetchone()[0]
         metadata = db.execute("SELECT value FROM meta WHERE key='source_manifest'").fetchone()
@@ -78,15 +85,41 @@ def export_public(store, output: Path):
     if city_points:
         residence['location'] = {'lat':sum(p[3] for p in city_points)/len(city_points),'lon':sum(p[4] for p in city_points)/len(city_points)}
     manifest = {'version':1,'updatedAt':source_time,'chapters':chapters,'counts':counts,'defaultChapterId':munich['id'],'defaultResidence':residence,'privacy':'randomized-public-locality; 1km-circles; no-names-or-addresses'}
-    generation = hashlib.sha256(json.dumps([manifest,dict(grouped),places],sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
-    manifest['generation'] = generation
     stage = Path(tempfile.mkdtemp(prefix='.public-export-', dir=output.parent))
     try:
         (stage / 'chapters').mkdir()
+        (stage / 'returnees' / 'archive').mkdir(parents=True)
         def write(path, value):
             path.write_text(json.dumps(value,ensure_ascii=False,separators=(',',':'))+'\n')
+        returnees_xlsx = stage / 'returnees.xlsx'
+        write_returnees_xlsx(returnees_xlsx, returnees, source_time)
+        old_archive = output / 'returnees' / 'archive'
+        if old_archive.exists():
+            if old_archive.is_symlink() or not old_archive.is_dir():
+                raise ValueError('invalid_returnee_archive')
+            for archived in old_archive.iterdir():
+                if archived.is_symlink() or not archived.is_file() or not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])\.xlsx', archived.name):
+                    raise ValueError('invalid_returnee_archive')
+                shutil.copy2(archived, stage / 'returnees' / 'archive' / archived.name)
+        try:
+            source_datetime = datetime.fromisoformat(source_time.replace('Z', '+00:00'))
+            if source_datetime.tzinfo is None:
+                source_datetime = source_datetime.replace(tzinfo=timezone.utc)
+        except (AttributeError, TypeError, ValueError):
+            source_datetime = datetime.now(timezone.utc)
+        month_key = source_datetime.astimezone(ZoneInfo('Europe/Berlin')).strftime('%Y-%m')
+        monthly_snapshot = stage / 'returnees' / 'archive' / (month_key + '.xlsx')
+        if not monthly_snapshot.exists():
+            shutil.copy2(returnees_xlsx, monthly_snapshot)
+        archive_months = sorted(path.stem for path in (stage / 'returnees' / 'archive').glob('*.xlsx'))
+        returnees_payload = {'version':1,'updatedAt':source_time,'scope':'afser-accessible','archiveMonths':archive_months,'records':returnees}
+        generation = hashlib.sha256(json.dumps([manifest,dict(grouped),places],sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        returnee_generation = hashlib.sha256(json.dumps(returnees_payload,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+        manifest['generation'] = generation
+        returnees_payload['generation'] = returnee_generation
         write(stage / 'manifest.json', manifest)
         write(stage / 'places.json', {'places':places,'generation':generation})
+        write(stage / 'returnees.json', returnees_payload)
         for chapter in [c['id'] for c in chapters]+['all']:
             write(stage / 'chapters' / (chapter+'.json'), {'chapter':chapter,'updatedAt':source_time,'generation':generation,'records':grouped[chapter]})
         if output.exists():
@@ -95,4 +128,4 @@ def export_public(store, output: Path):
     finally:
         if stage.exists():
             shutil.rmtree(stage)
-    return {'exported':True,'counts':counts,'chapters':len(chapters),'defaultChapter':munich['name'],'files':len(chapters)+3}
+    return {'exported':True,'counts':counts,'returnees':len(returnees),'chapters':len(chapters),'defaultChapter':munich['name'],'files':len(chapters)+5+len(archive_months)}
