@@ -5,7 +5,7 @@ import re
 from urllib.parse import parse_qs, urlsplit
 
 from .afser import AfserSource
-from .config import load_json, private_write
+from .config import load_json
 from .geodata import GeoData, chapter_id
 from .source import IncompleteSource, SourceError
 from .store import now
@@ -65,5 +65,4 @@ class CachedSource(AfserSource):
         snapshot = super().fetch()
         self.manifest['fetchedAt'] = old.get('fetchedAt', self.manifest['fetchedAt'])
         self.manifest['reprojectedAt'] = now()
-        private_write(self.private_dir / 'source-manifest.json', json.dumps(self.manifest, ensure_ascii=False))
         return snapshot

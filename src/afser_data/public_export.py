@@ -59,6 +59,11 @@ def export_public(store, output: Path):
             counts[record['kind']] += 1
         places = [[r['id'],r['city'],r['chapter'],round(r['latitude'],4),round(r['longitude'],4),r['postal_code']] for r in db.execute('SELECT * FROM places WHERE snapshot=? ORDER BY city,id', (snapshot,))]
         updated = db.execute('SELECT created_at FROM snapshots WHERE id=?', (snapshot,)).fetchone()[0]
+        metadata = db.execute("SELECT value FROM meta WHERE key='source_manifest'").fetchone()
+        # Old databases predate transactional source metadata; preserve their
+        # clock until the next successful import migrates it automatically.
+        committed = json.loads(metadata[0]) if metadata else load_json(store.directory / 'source-manifest.json', {})
+        source_time = committed.get('fetchedAt', updated)
     munich = next((c for c in chapters if c['name'] == 'München'), None)
     if munich is None or not all(re.fullmatch(r'[A-Za-z0-9_-]{1,100}', c['id']) for c in chapters):
         raise ValueError('invalid_public_chapter_catalog')
@@ -66,7 +71,6 @@ def export_public(store, output: Path):
     residence = {'chapterId': munich['id'], 'city':'München · Standard'}
     if city_points:
         residence['location'] = {'lat':sum(p[3] for p in city_points)/len(city_points),'lon':sum(p[4] for p in city_points)/len(city_points)}
-    source_time = load_json(store.directory / 'source-manifest.json', {}).get('fetchedAt', updated)
     manifest = {'version':1,'updatedAt':source_time,'chapters':chapters,'counts':counts,'defaultChapterId':munich['id'],'defaultResidence':residence,'privacy':'randomized-public-locality; 1km-circles; no-names-or-addresses'}
     generation = hashlib.sha256(json.dumps([manifest,dict(grouped),places],sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
     manifest['generation'] = generation

@@ -686,5 +686,4 @@ class AfserSource:
                    "located": sum(record.normalized is not None and record.normalized.kind == kind and record.normalized.latitude is not None and record.normalized.longitude is not None for record in records)}
             for kind in ("sending", "hopees", "hostees", "families")}
         self.manifest["postcodeMappings"] = len(self.chapter_postcodes)
-        private_write(self.private_dir / "source-manifest.json", json.dumps(self.manifest, ensure_ascii=False, indent=2))
-        return SourceSnapshot(chapters, records, self.geo.places(self.chapter_postcodes))
+        return SourceSnapshot(chapters, records, self.geo.places(self.chapter_postcodes), self.manifest)

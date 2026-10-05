@@ -34,3 +34,16 @@ def test_export_refuses_extra_private_fields_and_old_location_projection():
     record={'id':'a'*20,'kind':'sending','status':'open','chapterId':'MUN','sourceUrl':'https://www.afser.de/42','country':None}
     with pytest.raises(ValueError):validated_record({**record,'email':'secret@example.invalid'})
     with pytest.raises(ValueError):validated_record({**record,'location':{'lat':48,'lon':11,'radiusKm':10}})
+
+
+def test_export_uses_timestamp_committed_with_records_not_a_newer_cache(tmp_path):
+    store = Store(tmp_path / 'private')
+    committed = '2026-10-05T05:00:00Z'
+    snapshot = SourceSnapshot([Chapter('MUC', 'München')], [], manifest={'fetchedAt': committed})
+    store.activate(snapshot)
+    # Simulate a newer fetch writing its cache, but failing DB validation.
+    (store.directory / 'source-manifest.json').write_text(json.dumps({'fetchedAt':'2026-10-05T06:00:00Z'}))
+    output = tmp_path / 'site' / 'data'
+    export_public(store, output)
+    assert json.loads((output / 'manifest.json').read_text())['updatedAt'] == committed
+    assert json.loads((output / 'chapters/MUC.json').read_text())['updatedAt'] == committed

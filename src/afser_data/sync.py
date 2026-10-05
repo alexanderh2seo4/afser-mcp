@@ -22,13 +22,19 @@ class SyncManager:
         if not self.running.acquire(blocking=False):
             return {"ok": False, "error": "sync_in_progress"}
         fd = None
+        state = None
         try:
             fd = os.open(self.directory / "sync.lock", os.O_RDWR | os.O_CREAT, 0o600)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return {"ok": False, "error": "sync_in_progress"}
-            result = self.store.activate((adapter or build_adapter(self.directory)).fetch())
+            snapshot = (adapter or build_adapter(self.directory)).fetch()
+            result = self.store.activate(snapshot)
+            if snapshot.manifest is not None:
+                # Compatibility cache is written only after the DB transaction.
+                # Export reads committed metadata from that same DB snapshot.
+                private_write(self.directory / "source-manifest.json", json.dumps(snapshot.manifest, ensure_ascii=False))
             state = {"ok": True, **result, "lastAttemptAt": now()}
             LOG.info("sync complete: raw=%s active=%s", result["counts"]["raw"], result["counts"]["active"])
         except SourceError as exc:
@@ -39,10 +45,15 @@ class SyncManager:
             state = {"ok": False, "error": "source_validation_failed", "lastAttemptAt": now()}
             LOG.warning("sync failed: source_validation_failed")
         finally:
-            if fd is not None:
-                os.close(fd)
-            self.running.release()
-        private_write(self.directory / "sync-status.json", json.dumps(state))
+            try:
+                # Commit status before releasing either lock. Otherwise a newer
+                # sync can finish and have its result overwritten by this run.
+                if state is not None:
+                    private_write(self.directory / "sync-status.json", json.dumps(state))
+            finally:
+                if fd is not None:
+                    os.close(fd)
+                self.running.release()
         return state
 
     def poll(self, stop: threading.Event, interval: int, initial=True):

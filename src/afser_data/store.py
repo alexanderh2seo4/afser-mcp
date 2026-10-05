@@ -106,6 +106,13 @@ class Store:
             raise ValueError("reserved_chapter_id")
         counts = {"raw": 0, "active": 0, **{kind: 0 for kind in sorted(KINDS)}}
         timestamp = now()
+        metadata = snapshot.manifest or {}
+        if metadata.get('fetchedAt') is not None:
+            # Reject bad source clocks before changing the active snapshot.
+            fetched = datetime.fromisoformat(metadata['fetchedAt'].replace('Z', '+00:00'))
+            if fetched.tzinfo is None:
+                raise ValueError('invalid_source_timestamp')
+        serialized_manifest = json.dumps(metadata, ensure_ascii=False)
         with self.lock, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             snap_id = db.execute("INSERT INTO snapshots(created_at) VALUES (?)", (timestamp,)).lastrowid
@@ -138,6 +145,7 @@ class Store:
                         counts["active"] += 1
                         counts[record.kind] += 1
             db.execute("INSERT OR REPLACE INTO meta VALUES ('active_snapshot',?)", (str(snap_id),))
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('source_manifest',?)", (serialized_manifest,))
             for table in ("raw_records", "public_records", "chapters", "places", "snapshots"):
                 column = "id" if table == "snapshots" else "snapshot"
                 db.execute(f"DELETE FROM {table} WHERE {column} <> ?", (snap_id,))

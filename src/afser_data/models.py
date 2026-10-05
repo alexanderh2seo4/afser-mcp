@@ -53,3 +53,4 @@ class SourceSnapshot:
     chapters: list[Chapter]
     records: Iterable[RawRecord]
     places: list[Place] = field(default_factory=list)
+    manifest: dict | None = None
