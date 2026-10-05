@@ -15,7 +15,7 @@ from .privacy import PUBLIC_STATUS, source_link
 from .returnee_export import project_returnees, write_returnees_xlsx
 
 FIELDS = frozenset({'id','kind','chapterId','status','urgent','deadline','country','sourceUrl','city','location','hasOpenRoles','pickedAt'})
-PUBLIC_KINDS = tuple('awayees' if kind == 'hopees' else kind for kind in sorted(KINDS))
+PUBLIC_KINDS = tuple(sorted(KINDS))
 
 
 def validated_record(record):
@@ -63,13 +63,10 @@ def export_public(store, output: Path):
             record = validated_record(json.loads(row[0]))
             if record['chapterId'] not in chapter_ids | {'unassigned'}:
                 raise ValueError('unknown_public_chapter')
-            public_record = dict(record)
-            if public_record['kind'] == 'hopees':
-                public_record['kind'] = 'awayees'
-            grouped['all'][public_record['kind']].append(public_record)
+            grouped['all'][record['kind']].append(record)
             if record['chapterId'] in chapter_ids:
-                grouped[record['chapterId']][public_record['kind']].append(public_record)
-            counts[public_record['kind']] += 1
+                grouped[record['chapterId']][record['kind']].append(record)
+            counts[record['kind']] += 1
         places = [[r['id'],r['city'],r['chapter'],round(r['latitude'],4),round(r['longitude'],4),r['postal_code']] for r in db.execute('SELECT * FROM places WHERE snapshot=? ORDER BY city,id', (snapshot,))]
         updated = db.execute('SELECT created_at FROM snapshots WHERE id=?', (snapshot,)).fetchone()[0]
         metadata = db.execute("SELECT value FROM meta WHERE key='source_manifest'").fetchone()
