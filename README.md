@@ -84,6 +84,74 @@ uv run afser-data revoke-all
 The owner's computer and tunnel need to remain running for remote map access.
 Source links point back to AFSER, where AFSER's own login and signup controls apply.
 
+## Visitor contact intake
+
+The bridge has an optional `POST /api/contact` route for the skippable first-visit
+form and the separate `/Kontaktformular/` page. Both return visitors to the map
+after submission. Optional interest selections are included in the Excel export.
+It is disabled unless the owner creates the private
+`.private-data/contact-intake.json` configuration and publishes matching
+`docs/assets/contact-config.json` notice settings. The configuration must name
+the exact `alexanderh2seo4/afs-contact-submissions` repository, a retention
+statement, the collection purpose, a privacy contact, and a notice version.
+The public form stays disabled when any of those values or its HTTPS API URL is
+missing. Keep only visitor form submissions in this repository; existing AFSer
+source records remain in their separate local database.
+
+Accepted visitor submissions are stored in a separate owner-only
+`.private-data/visitor-contacts.sqlite3` database on the SSH computer. A
+background worker builds `visitor-submissions.xlsx` and pushes only that file to
+the private repository using its repository-specific SSH deploy key. Access
+logs and commit messages never include submitted values. The endpoint accepts
+only the configured website origin, limits request size and rate, and ignores
+the form's honeypot field. The browser sends only after the visitor checks the
+storage notice.
+
+Git retains previous workbook versions in repository history. Removing a row
+from the current Excel export does not remove older Git objects or downloaded
+copies; retention wording must account for this before enabling the route. A
+temporary Cloudflare Quick Tunnel is for testing and has no uptime guarantee;
+use a stable HTTPS hostname for the public site.
+
+The private intake configuration uses this shape (replace every placeholder
+before setting `enabled` to `true`):
+
+```json
+{
+  "enabled": false,
+  "repository": "alexanderh2seo4/afs-contact-submissions",
+  "repositoryPath": "/home/USER/work/afs-contact-submissions",
+  "branch": "main",
+  "noticeVersion": "CONTACT-NOTICE-VERSION",
+  "purpose": "CONTACT-PURPOSE",
+  "retentionText": "RETENTION-STATEMENT",
+  "privacyContact": "PRIVACY-CONTACT"
+}
+```
+
+The public `contact-config.json` uses the same `noticeVersion`, `purpose`,
+`retentionText`, and `privacyContact`, plus `enabled: true` and the HTTPS API
+origin. The bridge's private `bridge.json` must allow that exact site origin and
+API hostname. Never put repository credentials or submissions in the public
+configuration.
+
+After the private repository clone and repository-specific deploy key are
+ready, install `scripts/afs-contact-api.service` as a user systemd unit on the
+SSH computer. It runs the loopback bridge with source polling disabled, leaving
+the existing live updater as the only AFSer importer:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp ~/work/afs-live/site/scripts/afs-contact-api.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now afs-contact-api.service
+```
+
+The static website must use a stable HTTPS endpoint that forwards to this
+loopback service. Configure the exact endpoint hostname in `bridge.json` and
+the same endpoint origin in the public `contact-config.json`. Do not enable the
+form while either side is missing.
+
 ## API contract
 
 All data endpoints require a valid bearer token. `GET /api/status` without a
@@ -99,6 +167,7 @@ constant-time comparisons against locally stored SHA-256 token digests.
 | `GET /api/places?q=Berlin` | `{places:[{id,city,chapterId,location:{lat,lon}}]}` |
 | `GET /api/records?kind=sending&chapter=BER` | `{records,updatedAt,chapter,kind}` |
 | `GET /api/records?kind=hostees&chapter=all` | All active hostees, explicitly requested |
+| `POST /api/contact` | Stores one visitor form submission; configured website origin and consent version required |
 
 Kinds are `sending`, `hopees`, `hostees` and `families`. A chapter must be an
 explicit ID or `all`; there is no implicit default to all chapters. The filter

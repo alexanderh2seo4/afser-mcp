@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from .authentication import TokenRegistry
 from .config import BridgeConfig
+from .contact_intake import ContactIntake, ContactIntakeError
 from .store import Store
 
 LOG = logging.getLogger("afser.bridge")
@@ -53,8 +55,52 @@ class BridgeServer(ThreadingHTTPServer):
         # Cloudflare traffic shares a loopback socket; this global ceiling also
         # bounds random invalid tokens before token-file verification occurs.
         self.ip_limiter = RateLimiter(rate_per_minute=600, capacity=120)
+        self.contact_limiter = RateLimiter(rate_per_minute=3, capacity=3)
+        self.contact_sync_event = threading.Event()
+        self.contact_sync_stop = threading.Event()
+        try:
+            self.contact_intake = ContactIntake(store.directory)
+        except Exception:
+            # Intake setup must never prevent the existing read-only map from starting.
+            self.contact_intake = None
+        self.contact_sync_thread = None
+        if self.contact_intake:
+            self.contact_sync_thread = threading.Thread(target=self._contact_export_worker, daemon=True)
         self.connections = threading.BoundedSemaphore(32)
         super().__init__(("127.0.0.1", config.port if port is None else port), BridgeHandler)
+        if self.contact_sync_thread:
+            self.contact_sync_thread.start()
+
+    def notify_contact_submission(self):
+        if self.contact_sync_thread and self.contact_intake and self.contact_intake.enabled:
+            self.contact_sync_event.set()
+
+    def _contact_export_worker(self):
+        if self.contact_intake and self.contact_intake.enabled and self.contact_intake.records():
+            self.contact_sync_event.set()
+        while not self.contact_sync_stop.is_set():
+            self.contact_sync_event.wait()
+            if self.contact_sync_stop.is_set():
+                break
+            self.contact_sync_event.clear()
+            try:
+                if self.contact_intake and self.contact_intake.enabled:
+                    self.contact_intake.export_and_push()
+            except ContactIntakeError:
+                LOG.warning("Visitor contact export is pending; it will retry automatically.")
+                if self.contact_sync_stop.wait(60):
+                    break
+                self.contact_sync_event.set()
+            except Exception:
+                LOG.warning("Visitor contact export is pending; it will retry automatically.")
+                if self.contact_sync_stop.wait(60):
+                    break
+                self.contact_sync_event.set()
+
+    def server_close(self):
+        self.contact_sync_stop.set()
+        self.contact_sync_event.set()
+        super().server_close()
 
     def runtime_config(self):
         # The owner can add an exact new HTTPS tunnel host without restarting sync.
@@ -101,7 +147,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def send_error(self, code, message=None, explain=None):
         self.respond(code, {"error": "request_rejected"})
 
-    def respond(self, code: int, payload: dict, cors: str | None = None, preflight=False):
+    def respond(self, code: int, payload: dict, cors: str | None = None, preflight=False, preflight_method="GET"):
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -115,8 +161,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", cors)
             self.send_header("Vary", "Origin")
             if preflight:
-                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Authorization")
+                methods = "POST, OPTIONS" if preflight_method == "POST" else "GET, OPTIONS"
+                headers = "Content-Type" if preflight_method == "POST" else "Authorization"
+                self.send_header("Access-Control-Allow-Methods", methods)
+                self.send_header("Access-Control-Allow-Headers", headers)
                 self.send_header("Access-Control-Max-Age", "300")
                 # Needed by browsers when a hosted page calls a loopback bridge.
                 self.send_header("Access-Control-Allow-Private-Network", "true")
@@ -126,7 +174,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def validate_request(self) -> tuple[bool, str | None]:
+    def validate_request(self, allow_body=False) -> tuple[bool, str | None]:
         config = self.server.runtime_config()
         host = self.headers.get("Host", "")
         try:
@@ -148,7 +196,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if len(self.path) > 2048 or sum(len(k) + len(v) for k, v in self.headers.items()) > 8192:
             self.respond(413, {"error": "request_too_large"}, origin)
             return False, origin
-        if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Length", "0") != "0":
+        if self.headers.get("Transfer-Encoding"):
+            self.respond(400, {"error": "request_body_not_allowed"}, origin)
+            return False, origin
+        raw_length = self.headers.get("Content-Length", "0")
+        if not raw_length.isdigit():
+            self.respond(400, {"error": "invalid_content_length"}, origin)
+            return False, origin
+        length = int(raw_length)
+        if allow_body:
+            if length < 1 or length > 4096:
+                self.respond(413 if length > 4096 else 400, {"error": "request_too_large" if length > 4096 else "empty_request"}, origin)
+                return False, origin
+        elif length:
             self.respond(400, {"error": "request_body_not_allowed"}, origin)
             return False, origin
         return True, origin
@@ -196,12 +256,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         valid, origin = self.validate_request()
         if not valid:
             return
-        requested = self.headers.get("Access-Control-Request-Method", "GET")
-        requested_headers = self.headers.get("Access-Control-Request-Headers", "authorization").lower().split(",")
-        if requested != "GET" or any(header.strip() != "authorization" for header in requested_headers):
+        requested = self.headers.get("Access-Control-Request-Method", "GET").upper()
+        requested_headers = {header.strip().lower() for header in self.headers.get("Access-Control-Request-Headers", "").split(",") if header.strip()}
+        path = urlsplit(self.path).path
+        allowed_headers = {"content-type"} if requested == "POST" and path == "/api/contact" else {"authorization"}
+        if requested not in {"GET", "POST"} or (requested == "POST" and path != "/api/contact") or not requested_headers.issubset(allowed_headers):
             self.respond(403, {"error": "preflight_not_allowed"}, origin)
             return
-        self.respond(200, {}, origin, preflight=True)
+        self.respond(200, {}, origin, preflight=True, preflight_method=requested)
 
     def do_GET(self):
         valid, origin = self.validate_request()
@@ -255,7 +317,50 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.respond(503, {"error": "data_unavailable"}, origin)
 
     def do_POST(self):
-        self.respond(405, {"error": "read_only_api"})
+        if self.command != "POST":
+            self.respond(405, {"error": "method_not_allowed"})
+            return
+        parsed = urlsplit(self.path)
+        if parsed.path != "/api/contact" or parsed.query:
+            self.respond(405, {"error": "method_not_allowed"})
+            return
+        valid, origin = self.validate_request(allow_body=True)
+        if not valid:
+            return
+        config = self.server.runtime_config()
+        if not origin or origin not in config.origins:
+            self.respond(403, {"error": "origin_not_allowed"}, origin)
+            return
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self.respond(415, {"error": "unsupported_content_type"}, origin)
+            return
+        forwarded = self.headers.get("CF-Connecting-IP", "")
+        try:
+            client_ip = str(ipaddress.ip_address(forwarded)) if forwarded and self.headers.get("CF-Ray") else self.client_address[0]
+        except ValueError:
+            client_ip = self.client_address[0]
+        if not self.server.ip_limiter.allow(self.client_address[0]) or not self.server.contact_limiter.allow(client_ip):
+            self.respond(429, {"error": "rate_limited"}, origin)
+            return
+        if not self.server.contact_intake:
+            self.respond(503, {"error": "intake_unavailable"}, origin)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            accepted = self.server.contact_intake.submit(payload)
+            if accepted:
+                self.server.notify_contact_submission()
+            self.respond(202, {"accepted": True}, origin)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.respond(400, {"error": "invalid_submission"}, origin)
+        except ContactIntakeError as error:
+            status = 503 if str(error) == "intake_unavailable" else 400
+            self.respond(status, {"error": "intake_unavailable" if status == 503 else "invalid_submission"}, origin)
+        except Exception:
+            LOG.warning("Visitor contact submission could not be saved.")
+            self.respond(503, {"error": "intake_unavailable"}, origin)
 
     do_PUT = do_POST
     do_DELETE = do_POST

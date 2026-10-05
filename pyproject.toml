@@ -3,7 +3,10 @@ name = "afser-private-data"
 version = "0.1.0"
 description = "Local private AFSER sync, anonymous map API and MCP server"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.28,<2"]
+dependencies = [
+    "mcp>=1.28,<2",
+    "openpyxl>=3.1.5",
+]
 
 [project.scripts]
 afser-data = "afser_data.cli:main"
