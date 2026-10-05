@@ -49,6 +49,9 @@ def main():
     sub.add_parser("sync", help="run a complete atomic source sync; print aggregate counts only")
     sub.add_parser("status", help="print sanitized sync status")
     sub.add_parser("mcp", help="start the official MCP stdio server")
+    sub.add_parser("reproject-cached", help="rebuild anonymous locations from existing caches without network access")
+    export = sub.add_parser("export-public", help="explicitly export only anonymous active projections for static hosting")
+    export.add_argument("--output", type=Path, required=True)
     invite = sub.add_parser("invite", help="write a private invite HTML file; never print its token")
     invite.add_argument("--website", required=True)
     invite.add_argument("--endpoint", default="http://127.0.0.1:8765")
@@ -68,6 +71,15 @@ def main():
             print("All map invites revoked.")
             return
         store = Store(directory)
+        if args.command == "reproject-cached":
+            from .cached_source import CachedSource
+            result = SyncManager(store).run(CachedSource(load_json(directory / 'source.json', {}), directory))
+            print(json.dumps(result))
+            raise SystemExit(0 if result['ok'] else 1)
+        if args.command == "export-public":
+            from .public_export import export_public
+            print(json.dumps(export_public(store, args.output)))
+            return
         if args.command == "sync":
             result = SyncManager(store).run()
             print(json.dumps(result))

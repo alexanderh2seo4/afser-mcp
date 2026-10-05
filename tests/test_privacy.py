@@ -1,4 +1,5 @@
 import json
+import math
 from dataclasses import replace
 
 import pytest
@@ -16,17 +17,19 @@ def test_projection_only_allows_approved_fields():
     assert set(value) == {"id", "kind", "chapterId", "status", "urgent", "deadline", "country", "sourceUrl", "city", "location"}
     assert value["location"]["lat"] != 52.5111
     assert value["location"]["lon"] != 13.4011
-    assert value["location"]["radiusKm"] == 10
+    assert value["location"]["radiusKm"] == 1
     assert value["id"] != "source-42"
 
 
-def test_home_point_contains_no_distance_information_within_grid_cell():
-    # Two different home addresses in a cell yield the same output for this ID.
+def test_random_locality_point_is_stable_and_within_one_kilometre():
     a = approximate_location(52.5111, 13.4011, b"a" * 32, "home-42")
-    b = approximate_location(52.5999, 13.4999, b"a" * 32, "home-42")
-    assert a == b
     assert a == approximate_location(52.5111, 13.4011, b"a" * 32, "home-42")
     assert a != approximate_location(52.5111, 13.4011, b"b" * 32, "home-42")
+    assert a != approximate_location(52.5111, 13.4011, b"a" * 32, "home-43")
+    dlat = math.radians(a['lat'] - 52.5111)
+    dlon = math.radians(a['lon'] - 13.4011)
+    h = math.sin(dlat/2)**2 + math.cos(math.radians(52.5111))*math.cos(math.radians(a['lat']))*math.sin(dlon/2)**2
+    assert 0.1 < 6371 * 2 * math.asin(math.sqrt(h)) < 1
 
 
 def test_hopees_drop_city_and_home_coordinates():

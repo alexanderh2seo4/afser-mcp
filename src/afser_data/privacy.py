@@ -37,21 +37,21 @@ def _short(value: str | None, maximum: int = 100) -> str | None:
 
 
 def approximate_location(latitude: float, longitude: float, salt: bytes, identity: str) -> dict:
-    """Replace a home coordinate with a stable random point in a ~7 km grid.
+    """Show a 1 km circle around a stable random public-locality point.
 
-    Output depends only on the grid cell and a secret per-record key, never on
-    distance to the home within that cell. radiusKm describes the approximation.
-    The displayed point is not a household address and must not be geocoded back.
+    The adapter supplies public postal-area centroids, never house coordinates.
+    Stable keyed randomness prevents successive exports from revealing a base
+    point by averaging independently generated offsets.
     """
     if not (math.isfinite(latitude) and math.isfinite(longitude)) or not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
         raise ValueError("invalid_coordinates")
-    grid = 0.1
-    lat_cell = math.floor(latitude / grid)
-    lon_cell = math.floor(longitude / grid)
-    digest = hmac.digest(salt, f"point:{identity}:{lat_cell}:{lon_cell}".encode(), "sha256")
-    lat_fraction = 0.25 + int.from_bytes(digest[:4], "big") / 2**32 * 0.5
-    lon_fraction = 0.25 + int.from_bytes(digest[4:8], "big") / 2**32 * 0.5
-    return {"lat": round((lat_cell + lat_fraction) * grid, 3), "lon": round((lon_cell + lon_fraction) * grid, 3), "radiusKm": 10}
+    digest = hmac.digest(salt, f"locality-point-v2:{identity}".encode(), "sha256")
+    bearing = int.from_bytes(digest[:8], "big") / 2**64 * 2 * math.pi
+    distance = (0.2 + 0.7 * math.sqrt(int.from_bytes(digest[8:16], "big") / 2**64)) / 6371
+    lat, lon = math.radians(latitude), math.radians(longitude)
+    result_lat = math.asin(math.sin(lat) * math.cos(distance) + math.cos(lat) * math.sin(distance) * math.cos(bearing))
+    result_lon = lon + math.atan2(math.sin(bearing) * math.sin(distance) * math.cos(lat), math.cos(distance) - math.sin(lat) * math.sin(result_lat))
+    return {"lat": round(math.degrees(result_lat), 4), "lon": round((math.degrees(result_lon) + 180) % 360 - 180, 4), "radiusKm": 1}
 
 
 def project(record: Record, salt: bytes) -> dict:

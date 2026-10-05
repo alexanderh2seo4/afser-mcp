@@ -115,7 +115,7 @@ location: optional {lat,lon,radiusKm}
 
 No source names, street addresses, household postcodes, phone numbers, email
 addresses or raw payload fields are included. Household coordinates become a
-stable randomly shifted point inside a 0.1-degree grid, with a displayed 10 km
+stable randomly shifted public postal-locality point, with a displayed 1 km
 uncertainty radius. The result reveals no distance to the home inside that cell.
 Hopees have no city or home location; an explicit public destination-country
 centroid may be included with `scope: country` and `radiusKm: 0`.
@@ -216,3 +216,10 @@ Hopees, chapter/active filtering, full-sync rollback, private permissions,
 bearer expiry/revocation, CORS/Host protection, rate limits, read-only source
 routes, complete chapter partitions/board pagination, and a real MCP stdio
 initialize/tool-call exchange.
+
+
+## Explicit public GitHub export
+
+The website owner explicitly authorized publishing anonymous locations and destination countries. `export-public --output ../docs/data` writes only approved active projection fields and public locality metadata. München is the default chapter; home circles have 1 km radius with stable keyed random centres based on public postal centroids. Raw payloads and credentials remain local. The exporter refuses extra private fields, old 10 km projections and export targets inside private storage.
+
+`reproject-cached` rebuilds the local projection from existing complete private caches with all network access disabled. It preserves the source acquisition timestamp. The website repository's `scripts/update_public.py` handles scheduled source sync, export and audited publication. No raw-source endpoint is added to MCP or HTTP.
