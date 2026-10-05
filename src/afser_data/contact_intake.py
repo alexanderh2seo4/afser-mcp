@@ -266,7 +266,7 @@ class ContactIntake:
         self.export_workbook(export)
         status = self._git(repo, "status", "--porcelain", "--untracked-files=all")
         allowed = {EXPORT_NAME}
-        if any(line[3:] not in allowed for line in status.splitlines() if len(line) >= 4):
+        if any(line.strip().split(maxsplit=1)[-1] not in allowed for line in status.splitlines() if line.strip()):
             raise ContactIntakeError("contact_export_sync_failed")
         self._git(repo, "add", "--", EXPORT_NAME)
         changed = self._git(repo, "diff", "--cached", "--name-only")
