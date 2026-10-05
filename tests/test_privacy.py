@@ -58,3 +58,13 @@ def test_verified_afser_list_parameters_and_unicode_chapter_preserved():
 def test_nan_coordinates_fail_validation():
     with pytest.raises(ValueError):
         project(example(latitude=float("nan")), b"a" * 32)
+
+
+def test_pickup_metadata_is_typed_and_sending_only():
+    public = project(example(status='assigned',has_open_roles=False,picked_at='2026-10-05'), b'a'*32)
+    assert public['hasOpenRoles'] is False and public['pickedAt']=='2026-10-05'
+    with pytest.raises(ValueError):project(example(has_open_roles='private'),b'a'*32)
+    with pytest.raises(ValueError):project(example(status='assigned',picked_at='not a date'),b'a'*32)
+    with pytest.raises(ValueError):project(example(status='open',picked_at='2026-10-05'),b'a'*32)
+    hopeful = project(example(kind='hopees',status='active',picked_at='2026-10-05'),b'a'*32)
+    assert 'pickedAt' not in hopeful

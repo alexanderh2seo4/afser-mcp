@@ -38,6 +38,8 @@ class Record:
     latitude: float | None = None
     longitude: float | None = None
     location_scope: str = "area"
+    has_open_roles: bool | None = None
+    picked_at: str | None = None
 
 
 @dataclass(frozen=True)

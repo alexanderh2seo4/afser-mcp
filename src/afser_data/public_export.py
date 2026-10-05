@@ -5,13 +5,14 @@ import re
 import shutil
 import tempfile
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 from .config import load_json
 from .models import KINDS
 from .privacy import PUBLIC_STATUS, source_link
 
-FIELDS = frozenset({'id','kind','chapterId','status','urgent','deadline','country','sourceUrl','city','location'})
+FIELDS = frozenset({'id','kind','chapterId','status','urgent','deadline','country','sourceUrl','city','location','hasOpenRoles','pickedAt'})
 
 
 def validated_record(record):
@@ -21,6 +22,11 @@ def validated_record(record):
         raise ValueError('invalid_public_record')
     if source_link(record['sourceUrl']) != record['sourceUrl']:
         raise ValueError('unsafe_public_source_link')
+    if 'hasOpenRoles' in record and (record['kind'] != 'sending' or type(record['hasOpenRoles']) is not bool):
+        raise ValueError('invalid_interview_roles')
+    if 'pickedAt' in record:
+        if record['kind'] != 'sending' or record['status'] != 'assigned' or date.fromisoformat(record['pickedAt']).isoformat() != record['pickedAt']:
+            raise ValueError('invalid_pickup_metadata')
     location = record.get('location')
     if location:
         if set(location) - {'lat','lon','radiusKm','scope'}:

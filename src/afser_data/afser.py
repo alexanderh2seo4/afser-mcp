@@ -10,6 +10,7 @@ import http.cookiejar
 import json
 import os
 import re
+import sqlite3
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -438,7 +439,59 @@ class AfserSource:
         return Record(str(application["Id"]), "hostees", chapter, True, "active" if application.get("Status__c") == "Participation" else "pending", url,
                       country=country[0] if country else None, city=city, latitude=lat, longitude=lon)
 
+    def _previous_interviews(self):
+        """Compare against a committed import; never date old pickups as new."""
+        path = self.private_dir / "afser.sqlite3"
+        if not path.exists():
+            return {}
+        if path.is_symlink():
+            raise SourceError()
+        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+            row = db.execute("SELECT value FROM meta WHERE key='active_snapshot'").fetchone()
+            if row is None:
+                return {}
+            snapshot = int(row[0])
+            previous = {}
+            for (payload,) in db.execute("SELECT payload FROM raw_records WHERE snapshot=? AND entity_type='avtProject'", (snapshot,)):
+                item = json.loads(payload)
+                if "availableInterviewRoles" in item:
+                    previous[str(item["Id"])] = {"free": len(item["availableInterviewRoles"])}
+            for (body,) in db.execute("SELECT body FROM public_records WHERE snapshot=? AND kind='sending'", (snapshot,)):
+                item = json.loads(body)
+                match = re.search(r"/avtproject/(\d+)\.html$", urlsplit(item.get("sourceUrl", "")).path)
+                if match and item.get("pickedAt"):
+                    previous.setdefault(match[1], {})["pickedAt"] = item["pickedAt"]
+            return previous
+
+    @staticmethod
+    def _assigned_interview_roles(detail):
+        assigned = 0
+        for owner in detail.all():
+            if not ({"owner", "assignedowner"} & owner.classes()):
+                continue
+            parent, role, active = owner, None, True
+            while parent and parent is not detail:
+                classes = parent.classes()
+                if any(name.startswith("state_") for name in classes) and "state_1" not in classes:
+                    active = False
+                if "row" in classes and role is None:
+                    headings = list(parent.all("h4"))
+                    role = " ".join(h.text() for h in headings) if headings else parent.text()
+                parent = parent.parent
+            if not active or not role or not re.search(r"homeinterview", role, re.I):
+                continue
+            if "assignedowner" in owner.classes():
+                assigned += 1
+                continue
+            # Actual board slots are direct spans inside .taskowner.owner.
+            # Empty signup controls and nested forms are not confirmed owners.
+            assigned += sum(isinstance(node, Node) and node.tag == "span" and
+                            "freeowner" not in node.classes() and bool(node.text().strip())
+                            for node in owner.children)
+        return assigned
+
     def _board(self, today):
+        previous = self._previous_interviews()
         # Empty scalar filters really clear Joomla's saved checkbox filters;
         # this was verified against the live controls. State 1 is published.
         # Keeping all filters in every page request prevents the user's current
@@ -542,8 +595,16 @@ class AfserSource:
                         if owner_slot and active and role and re.search(r"homeinterview", role, re.I):
                             free_roles.append(href)
                     fields["availableInterviewRoles"] = free_roles
-                    if free_roles:
-                        stats["openSendingProjects"] += 1
+                    assigned_roles = self._assigned_interview_roles(detail)
+                    fields["assignedInterviewRoles"] = assigned_roles
+                    last = previous.get(project_id, {})
+                    picked_at = last.get("pickedAt") if assigned_roles else None
+                    if assigned_roles and "free" in last and len(free_roles) < last["free"]:
+                        picked_at = today.isoformat()
+                    if free_roles or assigned_roles:
+                        stats["openSendingProjects"] += bool(free_roles)
+                        stats["assignedSendingProjects"] += bool(assigned_roles)
+                        status = "assigned" if assigned_roles else "open"
                         code_candidates = [identity for identity, code in self.chapter_codes.items()
                                            if re.search(r"(?<![\w])" + re.escape(code) + r"(?![\w])", fields["chapter"], re.I)]
                         if len(code_candidates) != 1:
@@ -563,10 +624,10 @@ class AfserSource:
                             dates = [value for value in dates if value]
                             deadline = max(dates) if dates else None
                             explicit_urgent = bool(fields["priority"]) or any("critical" in node.classes() for node in [row, *row.all()])
-                            urgent = explicit_urgent or bool(deadline and deadline <= today + timedelta(days=14))
-                            normalized = Record("avt:" + project_id, "sending", chapter, True, "open", BASE + source_path,
+                            urgent = bool(free_roles) and (explicit_urgent or bool(deadline and deadline <= today + timedelta(days=14)))
+                            normalized = Record("avt:" + project_id, "sending", chapter, True, status, BASE + source_path,
                                                 urgent=urgent, deadline=deadline.isoformat() if deadline else None,
-                                                city=city, latitude=lat, longitude=lon)
+                                                city=city, latitude=lat, longitude=lon, has_open_roles=bool(free_roles), picked_at=picked_at)
                             stats["locatedSendingProjects"] += locality is not None
                         else:
                             stats["sendingChapterUnresolved"] += 1
@@ -574,12 +635,13 @@ class AfserSource:
                             dates = [value for value in dates if value]
                             deadline = max(dates) if dates else None
                             explicit_urgent = bool(fields["priority"]) or any("critical" in node.classes() for node in [row, *row.all()])
-                            urgent = explicit_urgent or bool(deadline and deadline <= today + timedelta(days=14))
+                            urgent = bool(free_roles) and (explicit_urgent or bool(deadline and deadline <= today + timedelta(days=14)))
                             # Explicitly unknown, never assigned to a guessed
                             # chapter or coordinate. The All view can still show
                             # the anonymous source signup link as an unlocated row.
-                            normalized = Record("avt:" + project_id, "sending", "unassigned", True, "open", BASE + source_path,
-                                                urgent=urgent, deadline=deadline.isoformat() if deadline else None)
+                            normalized = Record("avt:" + project_id, "sending", "unassigned", True, status, BASE + source_path,
+                                                urgent=urgent, deadline=deadline.isoformat() if deadline else None,
+                                                has_open_roles=bool(free_roles), picked_at=picked_at)
                 records.append(RawRecord(project_id, "avtProject", fields, normalized))
             if not page_count:
                 # AFSer's published filter can leave an empty trailing page in

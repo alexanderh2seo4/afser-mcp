@@ -74,6 +74,15 @@ def project(record: Record, salt: bytes) -> dict:
         "country": _short(record.country),
         "sourceUrl": source_link(record.source_url),
     }
+    if record.kind == "sending":
+        if record.has_open_roles is not None:
+            if type(record.has_open_roles) is not bool:
+                raise ValueError("invalid_interview_roles")
+            public["hasOpenRoles"] = record.has_open_roles
+        if record.picked_at:
+            if record.status != "assigned":
+                raise ValueError("invalid_pickup_status")
+            public["pickedAt"] = date.fromisoformat(record.picked_at).isoformat()
     # Outgoing students show only destination country and chapter, per request.
     if record.kind == "hopees":
         if record.location_scope == "country" and record.latitude is not None and record.longitude is not None:

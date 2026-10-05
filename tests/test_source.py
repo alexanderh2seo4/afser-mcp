@@ -97,7 +97,7 @@ def test_student_status_slices_recover_records_without_assigned_chapter(source):
     assert (None, {"status": "Preparation"}) in calls
 
 
-def test_board_clears_filters_follows_all_pages_and_requires_open_owner_slot(source):
+def test_board_clears_filters_follows_all_pages_and_distinguishes_picked_slots(source):
     first = page(42, pagination='<div class="pagination">Seite 1 von 2 <a href="/avt/avtprojects.html?start=20">2</a></div>')
     second = page(43, owner=False, pagination='<div class="pagination">Seite 2 von 2</div>')
     paths = []
@@ -110,10 +110,13 @@ def test_board_clears_filters_follows_all_pages_and_requires_open_owner_slot(sou
     source._get_html = fetch
     raw = source._board(date(2026, 10, 5))
     mapped = [record.normalized for record in raw if record.normalized]
-    assert len(mapped) == 1
+    assert len(mapped) == 2
     assert mapped[0].source_url == "https://www.afser.de/ereignis-liste/avtproject/42.html"
     assert mapped[0].urgent and mapped[0].deadline == "2026-10-10"
     assert mapped[0].city == "Berlin"
+    assert mapped[0].has_open_roles is True
+    assert mapped[1].status == "assigned" and mapped[1].has_open_roles is False
+    assert mapped[1].picked_at is None and not mapped[1].urgent
     assert len(paths) == 2
     for path in paths:
         query = parse_qs(urlsplit(path).query, keep_blank_values=True)
@@ -203,3 +206,31 @@ def test_two_hostees_in_one_family_keep_all_assignments_and_one_household_projec
     store.activate(snapshot)
     assert len(store.records("hostees", "BER")["records"]) == 2
     assert len(store.records("families", "BER")["records"]) == 1
+
+
+def test_picked_interviews_use_committed_changes_not_first_discovery(source):
+    from afser_data.models import Chapter, RawRecord, SourceSnapshot
+    store = Store(source.private_dir)
+    baseline = RawRecord('42', 'avtProject', {'Id':'42', 'availableInterviewRoles':['slot-a','slot-b']})
+    store.activate(SourceSnapshot([Chapter('BER','Berlin')], [baseline]))
+    occupied = '<div class="taskowner owner"><span><a href="/profil.html?id=123">Synthetic volunteer</a></span><span class="freeowner"><a href="/avt/avttaskform/addOwner/42.html">Join</a></span></div>'
+    content = page(42).replace('<div class="freeowner"><a href="/ereignis-liste/avttaskform/addOwner/42.html">Join</a></div>',occupied)
+    source._get_html = lambda path: content
+    raw = source._board(date(2026,10,5))
+    record = next(r.normalized for r in raw if r.normalized)
+    assert record.status == 'assigned' and record.has_open_roles is True
+    assert record.picked_at == '2026-10-05'
+    public = project(record,b'a'*32)
+    assert public['pickedAt'] == '2026-10-05' and public['hasOpenRoles'] is True
+    assert 'Synthetic volunteer' not in str(public)
+    store.activate(SourceSnapshot([Chapter('BER','Berlin')],raw))
+    again = source._board(date(2026,10,6))
+    assert next(r.normalized for r in again if r.normalized).picked_at == '2026-10-05'
+    # An existing fully picked task first encountered today has no pickup date.
+    source._get_html = lambda path: page(43,owner=False)
+    assert next(r.normalized for r in source._board(date(2026,10,6)) if r.normalized).picked_at is None
+
+
+def test_inactive_role_owners_do_not_become_picked_interviews(source):
+    source._get_html = lambda path: page(43,owner=False).replace('state_1','state_0')
+    assert not any(r.normalized for r in source._board(date(2026,10,5)))
