@@ -153,25 +153,36 @@ class AfserSource:
         if parts.path == "/index.php" and data is None:
             if query.get("option") != ["com_participantslist"] or query.get("controller") != ["participantslist"] or query.get("task", [None])[0] not in TASKS:
                 raise SourceError()
-        elapsed = time.monotonic() - self.last_request
-        if elapsed < 0.2:
-            time.sleep(0.2 - elapsed)
         headers = {"User-Agent": "AFSER-Private-Map/0.1 (authorized read-only sync)", "Accept": "application/json,text/html"}
         request = Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
-        try:
-            with self.opener.open(request, timeout=120) as response:
-                body = response.read(32 * 1024 * 1024 + 1)
-            if len(body) > 32 * 1024 * 1024:
-                raise IncompleteSource()
-            return body
-        except HTTPError as error:
-            if error.code in {401, 403}:
-                raise SessionExpired() from None
-            raise SourceError() from None
-        except (URLError, TimeoutError, OSError):
-            raise SourceError() from None
-        finally:
-            self.last_request = time.monotonic()
+        # Retry only reads. Replaying the login POST is never automatic.
+        attempts = 3 if data is None else 1
+        for attempt in range(attempts):
+            elapsed = time.monotonic() - self.last_request
+            if elapsed < 0.2:
+                time.sleep(0.2 - elapsed)
+            retry_delay = 0.5 * 2 ** attempt
+            try:
+                with self.opener.open(request, timeout=120) as response:
+                    body = response.read(32 * 1024 * 1024 + 1)
+                if len(body) > 32 * 1024 * 1024:
+                    raise IncompleteSource()
+                return body
+            except HTTPError as error:
+                if error.code in {401, 403}:
+                    raise SessionExpired() from None
+                if error.code not in {408, 429, 500, 502, 503, 504} or attempt + 1 == attempts:
+                    raise SourceError() from None
+                try:
+                    retry_delay = max(retry_delay, min(10, float(error.headers.get("Retry-After", "0"))))
+                except (AttributeError, TypeError, ValueError):
+                    pass
+            except (URLError, TimeoutError, OSError):
+                if attempt + 1 == attempts:
+                    raise SourceError() from None
+            finally:
+                self.last_request = time.monotonic()
+            time.sleep(retry_delay)
 
     @staticmethod
     def _login_form(content: str):
@@ -270,7 +281,9 @@ class AfserSource:
     def _complete_task(self, task: str, response, chapters: list[dict]) -> list[dict]:
         rows = self._records(response)
         expected = response.get("totalSize")
-        if not isinstance(expected, int) or expected < 0:
+        if type(expected) is not int or expected < 0:
+            raise IncompleteSource()
+        if len({source_identity(row, task) for row in rows}) != len(rows):
             raise IncompleteSource()
         if response.get("done") is True and len(rows) == expected:
             return rows
@@ -286,7 +299,7 @@ class AfserSource:
                 continue
             partition = self._task(task, code)
             part_rows = self._records(partition)
-            if partition.get("done") is not True or partition.get("totalSize") != len(part_rows):
+            if partition.get("done") is not True or type(partition.get("totalSize")) is not int or partition["totalSize"] != len(part_rows) or len({source_identity(row, task) for row in part_rows}) != len(part_rows):
                 raise IncompleteSource()
             for row in part_rows:
                 row_code = (row.get("Chapter__r") or {}).get("Chapter_Code__c")

@@ -40,6 +40,7 @@ class GeoData:
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory.chmod(0o700)
         self.postcodes: dict[str, tuple[str, float, float]] = {}
+        self.localities: list[tuple[str, str, str, float, float]] = []
         self.countries: dict[str, tuple[str, float, float]] = {}
 
     def _public_file(self, name: str, url: str, download: bool) -> bytes | None:
@@ -63,6 +64,8 @@ class GeoData:
         postal = self._public_file("DE.zip", POSTCODE_URL, download)
         grouped = defaultdict(list)
         if postal:
+            self.postcodes.clear()
+            localities = set()
             with zipfile.ZipFile(io.BytesIO(postal)) as archive:
                 # Read one fixed entry into memory; never extract arbitrary paths.
                 for line in archive.read("DE.txt").decode("utf-8").splitlines():
@@ -75,6 +78,8 @@ class GeoData:
                         continue
                     if 47 <= lat <= 56 and 5 <= lon <= 16:
                         grouped[cells[1]].append((cells[2], lat, lon))
+                        localities.add((cells[1], cells[2], cells[7] or cells[5] or cells[3], lat, lon))
+            self.localities = sorted(localities)
             for code, rows in grouped.items():
                 # A postcode can have multiple localities. Centroid and city come
                 # only from this public lookup, never from a private address.
@@ -148,5 +153,8 @@ class GeoData:
         return None
 
     def places(self, chapter_postcodes: dict[str, str]) -> list[Place]:
+        if self.localities:
+            return [Place(f"{code}:{index}", city, chapter_postcodes.get(code), lat, lon, code, region)
+                    for index, (code, city, region, lat, lon) in enumerate(self.localities)]
         return [Place(code, city, chapter_postcodes.get(code), lat, lon, code)
                 for code, (city, lat, lon) in sorted(self.postcodes.items())]

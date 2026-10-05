@@ -20,6 +20,7 @@ class Place:
     latitude: float
     longitude: float
     postal_code: str | None = None
+    region: str = ""
 
 
 @dataclass(frozen=True)

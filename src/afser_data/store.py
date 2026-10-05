@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import re
 import sqlite3
 import threading
 import unicodedata
@@ -18,7 +19,11 @@ def now() -> str:
 
 
 def search_key(value: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKD", value.casefold()) if not unicodedata.combining(c))
+    key = "".join(c for c in unicodedata.normalize("NFKD", value.casefold()) if not unicodedata.combining(c))
+    for original, replacement in (("ae", "a"), ("oe", "o"), ("ue", "u")):
+        key = key.replace(original, replacement)
+    key = re.sub(r"[^a-z0-9]+", " ", key).strip()
+    return "munchen" if key == "munich" else key
 
 
 class Store:
@@ -70,6 +75,9 @@ class Store:
                     search_key TEXT NOT NULL, chapter TEXT, latitude REAL NOT NULL, longitude REAL NOT NULL,
                     postal_code TEXT, PRIMARY KEY (snapshot,id));
             """)
+            if "region" not in {row["name"] for row in db.execute("PRAGMA table_info(places)")}:
+                db.execute("ALTER TABLE places ADD COLUMN region TEXT NOT NULL DEFAULT ''")
+            db.execute("CREATE INDEX IF NOT EXISTS place_lookup ON places(snapshot,postal_code,search_key)")
 
     @contextmanager
     def connect(self, read_snapshot=False):
@@ -110,7 +118,7 @@ class Store:
                     raise ValueError("unknown_place_chapter")
                 if not (-90 <= place.latitude <= 90 and -180 <= place.longitude <= 180):
                     raise ValueError("invalid_place_coordinate")
-                db.execute("INSERT INTO places VALUES (?,?,?,?,?,?,?,?)", (snap_id, place.id, place.city, search_key(place.city), place.chapter_id, place.latitude, place.longitude, place.postal_code))
+                db.execute("INSERT INTO places(snapshot,id,city,search_key,chapter,latitude,longitude,postal_code,region) VALUES (?,?,?,?,?,?,?,?,?)", (snap_id, place.id, place.city, search_key(place.city), place.chapter_id, place.latitude, place.longitude, place.postal_code, place.region))
             for raw in snapshot.records:
                 if not raw.source_id or not raw.entity_type:
                     raise ValueError("invalid_raw_record")
@@ -178,7 +186,18 @@ class Store:
         if not 2 <= len(query) <= 80:
             return {"places": []}
         key = search_key(query)
+        if len(key) < 2:
+            return {"places": []}
+        postal = key.isdigit()
         with self.connect(read_snapshot=True) as db:
             snapshot = self._active(db)
-            rows = db.execute("SELECT MIN(p.id) AS id,p.city,p.chapter,AVG(p.latitude) AS latitude,AVG(p.longitude) AS longitude,c.name AS chapter_name FROM places p LEFT JOIN chapters c ON c.snapshot=p.snapshot AND c.id=p.chapter WHERE p.snapshot=? AND (substr(p.search_key,1,?)=? OR substr(p.postal_code,1,?)=?) GROUP BY p.search_key,p.chapter ORDER BY CASE WHEN p.search_key=? THEN 0 ELSE 1 END,p.search_key,c.name LIMIT 12", (snapshot, len(key), key, len(query), query, key))
-            return {"places": [{"id": row["id"], "city": row["city"], "label": row["city"] + (" · " + row["chapter_name"] if row["chapter_name"] else ""), "chapterId": row["chapter"], "location": {"lat": round(row["latitude"], 4), "lon": round(row["longitude"], 4)}} for row in rows]}
+            rows = db.execute("""
+                SELECT MIN(p.id) AS id,p.city,p.chapter,p.region,MIN(p.postal_code) AS postal_code,
+                       AVG(p.latitude) AS latitude,AVG(p.longitude) AS longitude,c.name AS chapter_name
+                FROM places p LEFT JOIN chapters c ON c.snapshot=p.snapshot AND c.id=p.chapter
+                WHERE p.snapshot=? AND (substr(p.search_key,1,?)=? OR instr(' '||p.search_key,' '||?)>0 OR substr(p.postal_code,1,?)=?)
+                GROUP BY p.search_key,p.chapter,p.region,CASE WHEN ? THEN p.postal_code ELSE '' END
+                ORDER BY CASE WHEN p.search_key=? OR p.postal_code=? THEN 0 WHEN substr(p.search_key,1,?)=? THEN 1 ELSE 2 END,p.search_key,p.region,c.name,postal_code
+                LIMIT 20
+            """, (snapshot, len(key), key, key, len(key), key, postal, key, key, len(key), key))
+            return {"places": [{"id": row["id"], "city": row["city"], "label": " · ".join(filter(None, [row["city"], row["postal_code"] if postal else None, row["region"], row["chapter_name"]])), "chapterId": row["chapter"], "postalCode": row["postal_code"], "region": row["region"], "location": {"lat": round(row["latitude"], 4), "lon": round(row["longitude"], 4)}} for row in rows]}

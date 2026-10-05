@@ -79,7 +79,8 @@ def test_private_permissions_and_local_place_search(tmp_path):
     assert stat.S_IMODE((directory / "projection.key").stat().st_mode) == 0o600
     by_city = store.places("ber")
     by_postal = store.places("10115")
-    assert by_city == by_postal
+    assert by_city["places"][0]["location"] == by_postal["places"][0]["location"]
+    assert by_postal["places"][0]["label"] == "Berlin · 10115 · Berlin"
     assert by_city["places"][0]["chapterId"] == "BER"
     assert "postal_code" not in json.dumps(by_postal)
 
@@ -93,6 +94,28 @@ def test_city_results_merge_postal_centroids_and_disambiguate_chapters(tmp_path)
     assert len(places) == 2
     assert [place["label"] for place in places] == ["Neustadt · Berlin", "Neustadt · Hamburg"]
     assert places[0]["location"] == {"lat": 52.5, "lon": 13.4}
+
+
+def test_locality_search_aliases_regions_and_postal_precision(tmp_path):
+    store = Store(tmp_path)
+    source = snapshot()
+    source.chapters.append(Chapter("MUC", "München"))
+    source.places = [
+        Place("munich-a", "München", "MUC", 48.13, 11.57, "80331", "München"),
+        Place("munich-b", "München", "MUC", 48.15, 11.58, "80333", "München"),
+        Place("town-a", "Neustadt", "BER", 52.4, 13.3, "10110", "County A"),
+        Place("town-b", "Neustadt", "BER", 52.6, 13.5, "10111", "County B"),
+        Place("bad", "Bad Tölz", "MUC", 47.76, 11.56, "83646", "Bad Tölz"),
+    ]
+    store.activate(source)
+    for query in ("München", "Munchen", "Muenchen", "Munich"):
+        places = store.places(query)["places"]
+        assert len(places) == 1 and places[0]["chapterId"] == "MUC"
+        assert places[0]["location"] == {"lat": 48.14, "lon": 11.575}
+    assert store.places("80331")["places"][0]["location"] == {"lat": 48.13, "lon": 11.57}
+    assert len(store.places("Neustadt")["places"]) == 2
+    assert store.places("Tolz")["places"][0]["city"] == "Bad Tölz"
+    assert store.places("%%")["places"] == []
 
 
 def test_readers_keep_previous_complete_snapshot_during_slow_ingestion(tmp_path):
